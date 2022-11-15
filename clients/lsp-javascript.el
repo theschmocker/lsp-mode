@@ -25,6 +25,38 @@
 ;;; Code:
 
 (require 'lsp-mode)
+(require 'ht)
+
+(cl-defstruct typescript-server-plugin
+  name
+  dependency
+  activation-fn)
+
+(defvar lsp--registered-typescript-plugins (ht))
+
+(defun lsp-svelte--svelte-project-p (workspace-root)
+  "Check if the `Svelte' package is present in the package.json file in the WORKSPACE-ROOT."
+  (if-let ((package-json (f-join workspace-root "package.json"))
+           (exist (f-file-p package-json))
+           (config (json-read-file package-json))
+           (dev-dependencies (alist-get 'devDependencies config)))
+      (alist-get 'svelte dev-dependencies)
+  nil))
+
+(defun lsp-typescript-plugin (name activation-fn dep-definition)
+  ""
+  (lsp-dependency name dep-definition)
+  (ht-set lsp--registered-typescript-plugins
+          name
+          (make-typescript-server-plugin
+           :name name
+           :dependency dep-definition
+           :activation-fn activation-fn)))
+
+(lsp-typescript-plugin 'typescript-svelte-plugin
+                       #'lsp-svelte--svelte-project-p
+                       '(:npm :package "typescript-svelte-plugin"
+                         :path "typescript-svelte-plugin"))
 
 (lsp-dependency 'javascript-typescript-langserver
                 '(:system "javascript-typescript-stdio")
@@ -892,6 +924,14 @@ name (e.g. `data' variable passed as `data' parameter)."
     (when lsp-javascript-update-inlay-hints-on-scroll
       (setf window-scroll-functions (delete #'lsp-javascript-update-inlay-hints-scroll-function window-scroll-functions))))))
 
+(defun lsp--chain-package-ensure (packages callback error-callback)
+  (if (null packages)
+      (funcall callback)
+    (lsp-package-ensure (car packages)
+                        (lambda ()
+                          (lsp--chain-package-ensure (cdr packages) callback error-callback))
+                        error-callback)))
+
 (lsp-register-client
  (make-lsp-client :new-connection (lsp-stdio-connection (lambda ()
                                                           `(,(lsp-package-path 'typescript-language-server)
@@ -912,7 +952,25 @@ name (e.g. `data' variable passed as `data' parameter)."
                                              (when lsp-clients-typescript-npm-location
                                                (list :npmLocation lsp-clients-typescript-npm-location))
                                              (when lsp-clients-typescript-plugins
-                                               (list :plugins lsp-clients-typescript-plugins))
+                                               (list :plugins (append lsp-clients-typescript-plugins
+                                                                      (let ((registered-plugins (->> (ht-values lsp--registered-typescript-plugins)
+                                                                                                     (-filter (lambda (plugin)
+                                                                                                                (funcall (typescript-server-plugin-activation-fn plugin)
+                                                                                                                         (lsp--calculate-root (lsp-session) (buffer-file-name)))))
+                                                                                                     (-map (lambda (plugin)
+                                                                                                             (let ((name (plist-get (cdr (typescript-server-plugin-dependency plugin))
+                                                                                                                                    :package))
+                                                                                                                   (path (plist-get (cdr (typescript-server-plugin-dependency plugin))
+                                                                                                                                                  :path)))
+                                                                                                               (list :name name
+                                                                                                                     :location (f-join lsp-server-install-dir
+                                                                                                                                       "npm"
+                                                                                                                                       path
+                                                                                                                                       "lib"
+                                                                                                                                       "node_modules"
+                                                                                                                                       name)))))
+                                                                                                     (apply #'vector))))
+                                                                        registered-plugins))))
                                              (when lsp-clients-typescript-preferences
                                                (list :preferences lsp-clients-typescript-preferences))))
                   :initialized-fn (lambda (workspace)
@@ -933,14 +991,20 @@ name (e.g. `data' variable passed as `data' parameter)."
                   :server-id 'ts-ls
                   :request-handlers (ht ("_typescript.rename" #'lsp-javascript--rename))
                   :download-server-fn (lambda (_client callback error-callback _update?)
-                                        (lsp-package-ensure
-                                         'typescript
-                                         (-partial #'lsp-package-ensure
-                                                   'typescript-language-server
-                                                   callback
-                                                   error-callback)
-                                         error-callback))))
+                                        (let ((registered-plugin-names (->> (ht-values lsp--registered-typescript-plugins)
+                                                                            (-filter (lambda (plugin)
+                                                                                       (funcall (typescript-server-plugin-activation-fn plugin)
+                                                                                                (lsp--calculate-root (lsp-session) (buffer-file-name)))))
+                                                                            (-map #'typescript-server-plugin-name))))
+                                          (lsp--chain-package-ensure (append '(typescript typescript-language-server) registered-plugin-names)
+                                                                     callback
+                                                                     error-callback)))))
 
+(lambda (&rest args)
+  (lsp-package-ensure
+   'typescript-language-server
+   callback
+   error-callback))
 
 (defgroup lsp-flow nil
   "LSP support for the Flow Javascript type checker."
