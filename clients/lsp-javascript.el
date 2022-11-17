@@ -32,17 +32,6 @@
                 '(:npm :package "javascript-typescript-langserver"
                        :path "javascript-typescript-stdio"))
 
-(defun lsp--notify-typescript-plugins-available-for-installation ()
-  (when (eq 'ts-ls (lsp--workspace-server-id lsp--cur-workspace))
-    (when-let ((available-plugins (-filter (-compose #'not #'lsp--typescript-plugin-present-p)
-                                         (lsp--get-workspace-typescript-plugins (lsp--workspace-root lsp--cur-workspace)))))
-        (lsp--info "tsserver plugin(s) available for this workspace: %s. Install using M-x lsp-install-typescript-server"
-                   (mapconcat (-compose #'symbol-name #'typescript-server-plugin-name)
-                              available-plugins
-                              ", ")))))
-
-(add-hook 'lsp-after-initialize-hook #'lsp--notify-typescript-plugins-available-for-installation)
-
 (defgroup lsp-typescript-javascript nil
   "Support for TypeScript/JavaScript, using Sourcegraph's JavaScript/TypeScript language server."
   :group 'lsp-mode
@@ -1045,6 +1034,14 @@ is calculated based on the current buffer."
 (defun lsp--typescript-plugin-present-p (plugin)
   (file-exists-p (lsp--typescript-plugin-get-location plugin)))
 
+(defun lsp--notify-typescript-plugins-available-for-installation ()
+  (when (eq 'ts-ls (lsp--workspace-server-id lsp--cur-workspace))
+    (when-let ((available-plugins (-filter (-compose #'not #'lsp--typescript-plugin-present-p)
+                                         (lsp--get-workspace-typescript-plugins (lsp--workspace-root lsp--cur-workspace)))))
+        (lsp--info "tsserver plugin(s) available for this workspace: %s. Install using M-x lsp-install-typescript-server"
+                   (mapconcat (-compose #'symbol-name #'typescript-server-plugin-name)
+                              available-plugins
+                              ", ")))))
 
 (lsp-register-client
  (make-lsp-client :new-connection (lsp-stdio-connection (lambda ()
@@ -1080,7 +1077,8 @@ is calculated based on the current buffer."
                                        (ht-merge (lsp-configuration-section "javascript")
                                                  (lsp-configuration-section "typescript")
                                                  (lsp-configuration-section "completions")
-                                                 (lsp-configuration-section "diagnostics"))))
+                                                 (lsp-configuration-section "diagnostics")))
+                                      (lsp--notify-typescript-plugins-available-for-installation))
                                     (let ((caps (lsp--workspace-server-capabilities workspace))
                                           (format-enable (or lsp-javascript-format-enable lsp-typescript-format-enable)))
                                       (lsp:set-server-capabilities-document-formatting-provider? caps format-enable)
