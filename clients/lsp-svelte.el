@@ -25,6 +25,7 @@
 ;;; Code:
 
 (require 'lsp-mode)
+(require 'lsp-javascript)
 
 (defgroup lsp-svelte nil
   "LSP support for Svelte."
@@ -36,6 +37,20 @@
                 '(:system "svelteserver")
                 '(:npm :package "svelte-language-server"
                        :path "svelteserver"))
+
+(defun lsp-svelte--svelte-project-p (workspace-root)
+  "Check if the `Svelte' package is present in the package.json file in the WORKSPACE-ROOT."
+  (if-let ((package-json (f-join workspace-root "package.json"))
+           (exist (f-file-p package-json))
+           (config (json-read-file package-json))
+           (dev-dependencies (alist-get 'devDependencies config)))
+      (alist-get 'svelte dev-dependencies)
+  nil))
+
+(lsp-typescript-plugin 'typescript-svelte-plugin
+                       #'lsp-svelte--svelte-project-p
+                       '(:npm :package "typescript-svelte-plugin"
+                         :path "typescript-svelte-plugin"))
 
 (defcustom lsp-svelte-plugin-typescript-enable t
   "Enable the TypeScript plugin"
