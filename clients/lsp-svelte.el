@@ -298,8 +298,12 @@ Example: '((css-unused-selector . ignore) (unused-export-let . error))"
                                    :javascript (lsp-configuration-section "javascript"))
           :dontFilterIncompleteCompletions t))
   :server-id 'svelte-ls
-  :download-server-fn (lambda (_client callback error-callback _update?)
-                        (lsp-package-ensure 'svelte-language-server callback error-callback))
+  :download-server-fn (lambda (_client callback error-callback update?)
+                        (lsp-package-ensure 'svelte-language-server
+                                            (lambda ()
+                                              (lsp-install-typescript-plugin update? 'typescript-svelte-plugin)
+                                              (funcall callback))
+                                            error-callback))
   :initialized-fn
   (lambda (workspace)
     (with-lsp-workspace workspace
