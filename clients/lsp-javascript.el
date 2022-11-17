@@ -30,18 +30,88 @@
 (cl-defstruct typescript-server-plugin
   name
   dependency
-  activation-fn)
+  activation-fn
+  download-plugin-fn
+  download-in-progress?)
+
+(defun lsp-install-typescript-plugin (update? &optional plugin-name)
+  "Interactively install or re-install typescript plugin.
+When prefix UPDATE? is t force installation even if the plugin is present."
+  (interactive "P")
+  (lsp--require-packages)
+  (let* ((chosen-plugin (or (gethash plugin-name lsp--registered-typescript-plugins)
+                            (lsp--completing-read
+                             "Select plugin to install/re-install: "
+                             (or (->> lsp--registered-typescript-plugins
+                                      (ht-values)
+                                      (-filter (-andfn
+                                                (-not #'typescript-server-plugin-download-in-progress?)
+                                                #'typescript-server-plugin-download-plugin-fn)))
+                                 (user-error "There are no plugins with automatic installation"))
+                             (lambda (plugin)
+                               (let ((plugin-name (-> plugin typescript-server-plugin-name symbol-name)))
+                                 (if (lsp--typescript-plugin-present-p plugin) ;; TODO(lsp--server-binary-present? client)
+                                     (concat plugin-name " (Already installed)")
+                                   plugin-name)))
+                             nil
+                             t)))
+         (update? (or update?
+                      (and (not (typescript-server-plugin-download-in-progress? chosen-plugin))
+                           (lsp--typescript-plugin-present-p chosen-plugin)))))
+    (lsp--install-typescript-plugin-internal chosen-plugin update?)))
+
+(defun lsp--install-typescript-plugin-internal (plugin &optional update?)
+  (unless (typescript-server-plugin-download-plugin-fn plugin)
+    (user-error "There is no automatic installation for `%s', you have to install it manually following lsp-mode's documentation."
+                (typescript-server-plugin-name plugin)))
+  (setf (typescript-server-plugin-download-in-progress? plugin) t)
+  ;; (add-to-list 'global-mode-string '(t (:eval (lsp--download-status))))
+  (cl-flet ((done
+             (success? &optional error-message)
+             ;; run with idle timer to make sure the lsp command is executed in
+             ;; the main thread, see #2739.
+             (run-with-timer
+              0.0
+              nil
+              (lambda ()
+                (let ((tsls-workspaces (-filter (lambda (workspace)
+                                                  (and (equal 'ts-ls (lsp--workspace-server-id workspace))
+                                                       (with-lsp-workspace workspace
+                                                         (funcall (typescript-server-plugin-activation-fn plugin)
+                                                                  (lsp--workspace-root workspace)))))
+                                                (lsp--session-workspaces (lsp-session))))
+                      (plugin-name (typescript-server-plugin-name plugin)))
+                  (setf (typescript-server-plugin-download-in-progress? plugin) nil)
+                  (if success?
+                      (lsp--info "Plugin %s downloaded, restarting %s workspaces" plugin-name
+                                 (length tsls-workspaces))
+                    (lsp--error "Plugin %s install process failed with the following error message: %s.
+Check `*lsp-install*' and `*lsp-log*' buffer."
+                                plugin-name
+                                error-message))
+                  (seq-do
+                   (lambda (workspace)
+                     (with-lsp-workspace workspace
+                       ;; (cl-callf2 -remove-item '(t (:eval (lsp--download-status)))
+                       ;;            global-mode-string)
+                       (when success? (lsp-restart-workspace))))
+                   tsls-workspaces)
+                  ;; (unless (some #'typescript-server-plugin-download-in-progress? (ht-values lsp--registered-typescript-plugins))
+                  ;;   (cl-callf2 -remove-item '(t (:eval (lsp--download-status)))
+                  ;;              global-mode-string))
+                  )))))
+    (lsp--info "Download %s started." (typescript-server-plugin-name plugin))
+    (condition-case err
+        (funcall
+         (typescript-server-plugin-download-plugin-fn plugin)
+         plugin
+         (lambda () (done t))
+         (lambda (msg) (done nil msg))
+         update?)
+      (error
+       (done nil (error-message-string err))))))
 
 (defvar lsp--registered-typescript-plugins (ht))
-
-(defun lsp-svelte--svelte-project-p (workspace-root)
-  "Check if the `Svelte' package is present in the package.json file in the WORKSPACE-ROOT."
-  (if-let ((package-json (f-join workspace-root "package.json"))
-           (exist (f-file-p package-json))
-           (config (json-read-file package-json))
-           (dev-dependencies (alist-get 'devDependencies config)))
-      (alist-get 'svelte dev-dependencies)
-  nil))
 
 (defun lsp-typescript-plugin (name activation-fn dep-definition)
   ""
@@ -51,17 +121,32 @@
           (make-typescript-server-plugin
            :name name
            :dependency dep-definition
-           :activation-fn activation-fn)))
+           :activation-fn activation-fn
+           :download-plugin-fn (lambda (_plugin callback error-callback _update?)
+                                 (lsp-package-ensure name callback error-callback)))))
 
-(lsp-typescript-plugin 'typescript-svelte-plugin
-                       #'lsp-svelte--svelte-project-p
-                       '(:npm :package "typescript-svelte-plugin"
-                         :path "typescript-svelte-plugin"))
+(defun lsp--get-workspace-typescript-plugins (&optional workspace-root)
+  (->> (ht-values lsp--registered-typescript-plugins)
+       (-filter (lambda (plugin)
+                  (funcall (typescript-server-plugin-activation-fn plugin)
+                           (or workspace-root
+                               (lsp--calculate-root (lsp-session) (buffer-file-name))))))))
 
 (lsp-dependency 'javascript-typescript-langserver
                 '(:system "javascript-typescript-stdio")
                 '(:npm :package "javascript-typescript-langserver"
                        :path "javascript-typescript-stdio"))
+
+(defun lsp--notify-typescript-plugins-available-for-installation ()
+  (when (eq 'ts-ls (lsp--workspace-server-id lsp--cur-workspace))
+    (when-let ((available-plugins (-filter (-compose #'not #'lsp--typescript-plugin-present-p)
+                                         (lsp--get-workspace-typescript-plugins (lsp--workspace-root lsp--cur-workspace)))))
+        (lsp--info "tsserver plugin(s) available for this workspace: %s. Install using M-x lsp-install-typescript-server"
+                   (mapconcat (-compose #'symbol-name #'typescript-server-plugin-name)
+                              available-plugins
+                              ", ")))))
+
+(add-hook 'lsp-after-initialize-hook #'lsp--notify-typescript-plugins-available-for-installation)
 
 (defgroup lsp-typescript-javascript nil
   "Support for TypeScript/JavaScript, using Sourcegraph's JavaScript/TypeScript language server."
@@ -932,6 +1017,26 @@ name (e.g. `data' variable passed as `data' parameter)."
                           (lsp--chain-package-ensure (cdr packages) callback error-callback))
                         error-callback)))
 
+(defun lsp--typescript-plugin-get-name (plugin)
+  (plist-get (cdr (typescript-server-plugin-dependency plugin))
+             :package))
+
+(defun lsp--typescript-plugin-get-location (plugin)
+  (let ((name (lsp--typescript-plugin-get-name plugin))
+        (path (plist-get
+               (cdr (typescript-server-plugin-dependency plugin))
+               :path)))
+    (f-join lsp-server-install-dir
+            "npm"
+            path
+            "lib"
+            "node_modules"
+            name)))
+
+(defun lsp--typescript-plugin-present-p (plugin)
+  (file-exists-p (lsp--typescript-plugin-get-location plugin)))
+
+
 (lsp-register-client
  (make-lsp-client :new-connection (lsp-stdio-connection (lambda ()
                                                           `(,(lsp-package-path 'typescript-language-server)
@@ -953,24 +1058,11 @@ name (e.g. `data' variable passed as `data' parameter)."
                                                (list :npmLocation lsp-clients-typescript-npm-location))
                                              (when lsp-clients-typescript-plugins
                                                (list :plugins (append lsp-clients-typescript-plugins
-                                                                      (let ((registered-plugins (->> (ht-values lsp--registered-typescript-plugins)
-                                                                                                     (-filter (lambda (plugin)
-                                                                                                                (funcall (typescript-server-plugin-activation-fn plugin)
-                                                                                                                         (lsp--calculate-root (lsp-session) (buffer-file-name)))))
-                                                                                                     (-map (lambda (plugin)
-                                                                                                             (let ((name (plist-get (cdr (typescript-server-plugin-dependency plugin))
-                                                                                                                                    :package))
-                                                                                                                   (path (plist-get (cdr (typescript-server-plugin-dependency plugin))
-                                                                                                                                                  :path)))
-                                                                                                               (list :name name
-                                                                                                                     :location (f-join lsp-server-install-dir
-                                                                                                                                       "npm"
-                                                                                                                                       path
-                                                                                                                                       "lib"
-                                                                                                                                       "node_modules"
-                                                                                                                                       name)))))
-                                                                                                     (apply #'vector))))
-                                                                        registered-plugins))))
+                                                                      (->> (lsp--get-workspace-typescript-plugins)
+                                                                           (-map (lambda (plugin)
+                                                                                   (list :name (lsp--typescript-plugin-get-name plugin)
+                                                                                         :location (lsp--typescript-plugin-get-location plugin))))
+                                                                           (apply #'vector)))))
                                              (when lsp-clients-typescript-preferences
                                                (list :preferences lsp-clients-typescript-preferences))))
                   :initialized-fn (lambda (workspace)
@@ -990,21 +1082,12 @@ name (e.g. `data' variable passed as `data' parameter)."
                   :ignore-messages '("readFile .*? requested by TypeScript but content not available")
                   :server-id 'ts-ls
                   :request-handlers (ht ("_typescript.rename" #'lsp-javascript--rename))
-                  :download-server-fn (lambda (_client callback error-callback _update?)
-                                        (let ((registered-plugin-names (->> (ht-values lsp--registered-typescript-plugins)
-                                                                            (-filter (lambda (plugin)
-                                                                                       (funcall (typescript-server-plugin-activation-fn plugin)
-                                                                                                (lsp--calculate-root (lsp-session) (buffer-file-name)))))
-                                                                            (-map #'typescript-server-plugin-name))))
-                                          (lsp--chain-package-ensure (append '(typescript typescript-language-server) registered-plugin-names)
-                                                                     callback
-                                                                     error-callback)))))
+                  :download-server-fn (lambda (_client callback error-callback update?)
+                                        (lsp--chain-package-ensure (append '(typescript typescript-language-server))
+                                                                    callback
+                                                                    error-callback))))
 
-(lambda (&rest args)
-  (lsp-package-ensure
-   'typescript-language-server
-   callback
-   error-callback))
+
 
 (defgroup lsp-flow nil
   "LSP support for the Flow Javascript type checker."
