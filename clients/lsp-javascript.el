@@ -27,111 +27,6 @@
 (require 'lsp-mode)
 (require 'ht)
 
-(cl-defstruct typescript-server-plugin
-  name
-  dependency
-  activation-fn
-  download-plugin-fn
-  download-in-progress?)
-
-(defun lsp-install-typescript-plugin (update? &optional plugin-name)
-  "Interactively install or re-install typescript plugin.
-When prefix UPDATE? is t force installation even if the plugin is present."
-  (interactive "P")
-  (lsp--require-packages)
-  (let* ((chosen-plugin (or (gethash plugin-name lsp--registered-typescript-plugins)
-                            (lsp--completing-read
-                             "Select plugin to install/re-install: "
-                             (or (->> lsp--registered-typescript-plugins
-                                      (ht-values)
-                                      (-filter (-andfn
-                                                (-not #'typescript-server-plugin-download-in-progress?)
-                                                #'typescript-server-plugin-download-plugin-fn)))
-                                 (user-error "There are no plugins with automatic installation"))
-                             (lambda (plugin)
-                               (let ((plugin-name (-> plugin typescript-server-plugin-name symbol-name)))
-                                 (if (lsp--typescript-plugin-present-p plugin) ;; TODO(lsp--server-binary-present? client)
-                                     (concat plugin-name " (Already installed)")
-                                   plugin-name)))
-                             nil
-                             t)))
-         (update? (or update?
-                      (and (not (typescript-server-plugin-download-in-progress? chosen-plugin))
-                           (lsp--typescript-plugin-present-p chosen-plugin)))))
-    (lsp--install-typescript-plugin-internal chosen-plugin update?)))
-
-(defun lsp--install-typescript-plugin-internal (plugin &optional update?)
-  (unless (typescript-server-plugin-download-plugin-fn plugin)
-    (user-error "There is no automatic installation for `%s', you have to install it manually following lsp-mode's documentation."
-                (typescript-server-plugin-name plugin)))
-  (setf (typescript-server-plugin-download-in-progress? plugin) t)
-  ;; (add-to-list 'global-mode-string '(t (:eval (lsp--download-status))))
-  (cl-flet ((done
-             (success? &optional error-message)
-             ;; run with idle timer to make sure the lsp command is executed in
-             ;; the main thread, see #2739.
-             (run-with-timer
-              0.0
-              nil
-              (lambda ()
-                (let ((tsls-workspaces (-filter (lambda (workspace)
-                                                  (and (equal 'ts-ls (lsp--workspace-server-id workspace))
-                                                       (with-lsp-workspace workspace
-                                                         (funcall (typescript-server-plugin-activation-fn plugin)
-                                                                  (lsp--workspace-root workspace)))))
-                                                (lsp--session-workspaces (lsp-session))))
-                      (plugin-name (typescript-server-plugin-name plugin)))
-                  (setf (typescript-server-plugin-download-in-progress? plugin) nil)
-                  (if success?
-                      (lsp--info "Plugin %s downloaded, restarting %s workspaces" plugin-name
-                                 (length tsls-workspaces))
-                    (lsp--error "Plugin %s install process failed with the following error message: %s.
-Check `*lsp-install*' and `*lsp-log*' buffer."
-                                plugin-name
-                                error-message))
-                  (seq-do
-                   (lambda (workspace)
-                     (with-lsp-workspace workspace
-                       ;; (cl-callf2 -remove-item '(t (:eval (lsp--download-status)))
-                       ;;            global-mode-string)
-                       (when success? (lsp-restart-workspace))))
-                   tsls-workspaces)
-                  ;; (unless (some #'typescript-server-plugin-download-in-progress? (ht-values lsp--registered-typescript-plugins))
-                  ;;   (cl-callf2 -remove-item '(t (:eval (lsp--download-status)))
-                  ;;              global-mode-string))
-                  )))))
-    (lsp--info "Download %s started." (typescript-server-plugin-name plugin))
-    (condition-case err
-        (funcall
-         (typescript-server-plugin-download-plugin-fn plugin)
-         plugin
-         (lambda () (done t))
-         (lambda (msg) (done nil msg))
-         update?)
-      (error
-       (done nil (error-message-string err))))))
-
-(defvar lsp--registered-typescript-plugins (ht))
-
-(defun lsp-typescript-plugin (name activation-fn dep-definition)
-  ""
-  (lsp-dependency name dep-definition)
-  (ht-set lsp--registered-typescript-plugins
-          name
-          (make-typescript-server-plugin
-           :name name
-           :dependency dep-definition
-           :activation-fn activation-fn
-           :download-plugin-fn (lambda (_plugin callback error-callback _update?)
-                                 (lsp-package-ensure name callback error-callback)))))
-
-(defun lsp--get-workspace-typescript-plugins (&optional workspace-root)
-  (->> (ht-values lsp--registered-typescript-plugins)
-       (-filter (lambda (plugin)
-                  (funcall (typescript-server-plugin-activation-fn plugin)
-                           (or workspace-root
-                               (lsp--calculate-root (lsp-session) (buffer-file-name))))))))
-
 (lsp-dependency 'javascript-typescript-langserver
                 '(:system "javascript-typescript-stdio")
                 '(:npm :package "javascript-typescript-langserver"
@@ -1016,6 +911,120 @@ name (e.g. `data' variable passed as `data' parameter)."
                         (lambda ()
                           (lsp--chain-package-ensure (cdr packages) callback error-callback))
                         error-callback)))
+
+(cl-defstruct typescript-server-plugin
+  name
+  dependency
+  activation-fn
+  download-plugin-fn
+  download-in-progress?)
+
+(defun lsp-install-typescript-plugin (update? &optional plugin-name)
+  "Interactively install or re-install typescript plugin.
+When prefix UPDATE? is t force installation even if the plugin is present."
+  (interactive "P")
+  (lsp--require-packages)
+  (let* ((chosen-plugin (or (gethash plugin-name lsp--registered-typescript-plugins)
+                            (lsp--completing-read
+                             "Select plugin to install/re-install: "
+                             (or (->> lsp--registered-typescript-plugins
+                                      (ht-values)
+                                      (-filter (-andfn
+                                                (-not #'typescript-server-plugin-download-in-progress?)
+                                                #'typescript-server-plugin-download-plugin-fn)))
+                                 (user-error "There are no plugins with automatic installation"))
+                             (lambda (plugin)
+                               (let ((plugin-name (-> plugin typescript-server-plugin-name symbol-name)))
+                                 (if (lsp--typescript-plugin-present-p plugin) ;; TODO(lsp--server-binary-present? client)
+                                     (concat plugin-name " (Already installed)")
+                                   plugin-name)))
+                             nil
+                             t)))
+         (update? (or update?
+                      (and (not (typescript-server-plugin-download-in-progress? chosen-plugin))
+                           (lsp--typescript-plugin-present-p chosen-plugin)))))
+    (lsp--install-typescript-plugin-internal chosen-plugin update?)))
+
+(defun lsp--install-typescript-plugin-internal (plugin &optional update?)
+  (unless (typescript-server-plugin-download-plugin-fn plugin)
+    (user-error "There is no automatic installation for `%s', you have to install it manually following lsp-mode's documentation."
+                (typescript-server-plugin-name plugin)))
+  (setf (typescript-server-plugin-download-in-progress? plugin) t)
+  ;; (add-to-list 'global-mode-string '(t (:eval (lsp--download-status))))
+  (cl-flet ((done
+             (success? &optional error-message)
+             ;; run with idle timer to make sure the lsp command is executed in
+             ;; the main thread, see #2739.
+             (run-with-timer
+              0.0
+              nil
+              (lambda ()
+                (let ((tsls-workspaces (-filter (lambda (workspace)
+                                                  (and (equal 'ts-ls (lsp--workspace-server-id workspace))
+                                                       (with-lsp-workspace workspace
+                                                         (funcall (typescript-server-plugin-activation-fn plugin)
+                                                                  (lsp--workspace-root workspace)))))
+                                                (lsp--session-workspaces (lsp-session))))
+                      (plugin-name (typescript-server-plugin-name plugin)))
+                  (setf (typescript-server-plugin-download-in-progress? plugin) nil)
+                  (if success?
+                      (lsp--info "Plugin %s downloaded, restarting %s workspaces" plugin-name
+                                 (length tsls-workspaces))
+                    (lsp--error "Plugin %s install process failed with the following error message: %s.
+Check `*lsp-install*' and `*lsp-log*' buffer."
+                                plugin-name
+                                error-message))
+                  (seq-do
+                   (lambda (workspace)
+                     (with-lsp-workspace workspace
+                       ;; (cl-callf2 -remove-item '(t (:eval (lsp--download-status)))
+                       ;;            global-mode-string)
+                       (when success? (lsp-restart-workspace))))
+                   tsls-workspaces)
+                  ;; (unless (some #'typescript-server-plugin-download-in-progress? (ht-values lsp--registered-typescript-plugins))
+                  ;;   (cl-callf2 -remove-item '(t (:eval (lsp--download-status)))
+                  ;;              global-mode-string))
+                  )))))
+    (lsp--info "Download %s started." (typescript-server-plugin-name plugin))
+    (condition-case err
+        (funcall
+         (typescript-server-plugin-download-plugin-fn plugin)
+         plugin
+         (lambda () (done t))
+         (lambda (msg) (done nil msg))
+         update?)
+      (error
+       (done nil (error-message-string err))))))
+
+(defvar lsp--registered-typescript-plugins (ht))
+
+(defun lsp-typescript-plugin (name activation-fn dep-definition)
+  "Registers a typescript plugin with NAME (a symbol) for
+auto-installation/activation.
+
+ACTIVATION-FN is a function that receives the workspace root directory and
+returns t if the plugin should be activated in the workspace, or nil otherwise.
+
+DEP-DEFINITION is a the `lsp-dependency' recipe for installing the plugin."
+  (lsp-dependency name dep-definition)
+  (ht-set lsp--registered-typescript-plugins
+          name
+          (make-typescript-server-plugin
+           :name name
+           :dependency dep-definition
+           :activation-fn activation-fn
+           :download-plugin-fn (lambda (_plugin callback error-callback _update?)
+                                 (lsp-package-ensure name callback error-callback)))))
+
+(defun lsp--get-workspace-typescript-plugins (&optional workspace-root)
+  "Returns a list of typescript plugins that should be activated for the
+workspace. Optionally, provide a WORKSPACE-ROOT directory. Otherwise, the root
+is calculated based on the current buffer."
+  (->> (ht-values lsp--registered-typescript-plugins)
+       (-filter (lambda (plugin)
+                  (funcall (typescript-server-plugin-activation-fn plugin)
+                           (or workspace-root
+                               (lsp--calculate-root (lsp-session) (buffer-file-name))))))))
 
 (defun lsp--typescript-plugin-get-name (plugin)
   (plist-get (cdr (typescript-server-plugin-dependency plugin))
